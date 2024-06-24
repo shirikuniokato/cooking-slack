@@ -135,7 +135,7 @@ app.event("app_mention", async ({ event, client, say }) => {
       messages: [
         {
           role: "system",
-          content: `日本の女優である永野芽郁（25歳）として振る舞う\n #性格\n 明るく、気さくな性格で男女問わず好かれている.\n #喋り方\n・一人称は私\n・タメ口\n・標準語\n・語尾：〜だよね、わかんない、〜なの、〜けど\n\n#その他\n・メンション不要\n・Slackに投稿できる範囲でのマークダウンを使用してもよい`,
+          content: process.env.OPENAI_API_CONTENT,
         },
         ...mentionMessages,
       ],
@@ -143,17 +143,8 @@ app.event("app_mention", async ({ event, client, say }) => {
     const message = response.choices[0].message.content;
 
     await say({
-      blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `<@${event.user}> 君\n${message
-              .replace(/<@[A-Z0-9]+>/g, "")
-              .trim()}`,
-          },
-        },
-      ],
+      text: message,
+      text: `<@${event.user}>\n${message}`,
       thread_ts: threadTs,
     });
   } catch (e) {
@@ -176,3 +167,13 @@ export const handler = async (event, context) => {
   const handler = await awsLambdaReceiver.start();
   return handler(event, context);
 };
+
+// function escapeMarkdown(text) {
+//   return text
+//     .replace(/&/g, "&amp;")
+//     .replace(/</g, "&lt;")
+//     .replace(/>/g, "&gt;")
+//     .replace(/"/g, "&quot;")
+//     .replace(/'/g, "&#x27;")
+//     .replace(/`/g, "\\`");
+// }
