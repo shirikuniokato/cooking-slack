@@ -91,27 +91,57 @@ app.event("app_mention", async ({ event, client, say }) => {
     const threadMessages = threadMessagesResponse.messages;
 
     const slackBotId = process.env.SLACK_BOT_ID;
+    console.log(threadMessages);
 
     // OpenAI APIに渡すためのメッセージオブジェクトを作成する。
     const mentionMessages = threadMessages
       .map((message) => {
         const role = message.user === slackBotId ? "assistant" : "user";
+        let content = message.text.replace(/<@[A-Z0-9]+>/g, "").trim();
+        const urlRegex = /https?:\/\/[^\s]+?\.(png|jpeg|jpg|webp|gif)/gi;
+
+        if (message.files && message.files.length !== 0) {
+          console.log(message.files[0]);
+        }
+
+        // マッチした全てのURLを配列で取得
+        const urls = content.match(urlRegex);
+        if (!urls) {
+          return {
+            role: role,
+            content,
+          };
+        }
+
+        const images = urls.map((url) => ({
+          type: "image_url",
+          image_url: {
+            url: url,
+            detail: "auto",
+          },
+        }));
+        console.log(images);
+
         return {
           role: role,
-          content: message.text.replace(/<@[A-Z0-9]+>/g, "").trim(),
+          content: [
+            {
+              type: "text",
+              text: content,
+            },
+            ...images,
+          ],
         };
       })
-      .filter((e) => e); // undefinedを除く
+      .filter((e) => e);
+
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_TOKEN,
     });
 
     // Chat completions APIを呼ぶ
     const response = await openai.chat.completions.create({
-      model:
-        event.text.indexOf("gpt-4") !== -1
-          ? "gpt-4"
-          : process.env.OPEN_AI_MODEL,
+      model: process.env.OPEN_AI_MODEL,
       messages: [
         {
           role: "system",
@@ -129,13 +159,14 @@ app.event("app_mention", async ({ event, client, say }) => {
 
     await say({
       text: message,
-      text: `<@${event.user}>さん\n${message}`,
+      // text: `<@${event.user}>さん\n${message}`,
+      text: `${message}`,
       thread_ts: threadTs,
     });
   } catch (e) {
     console.error(e);
     await say({
-      text: `<@${event.user}>さん\n 不具合が発生しました。開発者にお問い合わせください。`,
+      text: `不具合が発生しました。開発者にお問い合わせください。`,
       thread_ts: threadTs,
     });
   }
@@ -207,6 +238,41 @@ const imagePrompt = [
       ],
     },
   },
+  {
+    type: "section",
+    text: {
+      type: "plain_text",
+      text: "スタイル",
+    },
+    block_id: "style_block",
+    accessory: {
+      type: "radio_buttons",
+      action_id: "style",
+      initial_option: {
+        value: "vivid",
+        text: {
+          type: "plain_text",
+          text: "vivid",
+        },
+      },
+      options: [
+        {
+          value: "vivid",
+          text: {
+            type: "plain_text",
+            text: "vivid",
+          },
+        },
+        {
+          value: "natural",
+          text: {
+            type: "plain_text",
+            text: "natural",
+          },
+        },
+      ],
+    },
+  },
 ];
 
 app.command("/generate-image", async ({ ack, body, client, logger }) => {
@@ -262,11 +328,12 @@ app.view("generate_image", async ({ ack, body, view, client, logger }) => {
     const val = view["state"]["values"];
     const prompt = val.prompt_block.prompt.value;
     const size = val.size_block.size.selected_option.value;
+    const style = val.style_block.style.selected_option.value;
 
     const sqs = new SQS();
     const params = {
       QueueUrl: process.env.SQS_QUEUE_URL,
-      MessageBody: JSON.stringify({ prompt, size, channelId, user }),
+      MessageBody: JSON.stringify({ prompt, size, style, channelId, user }),
     };
 
     await sqs.sendMessage(params).promise();
