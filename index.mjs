@@ -3,6 +3,7 @@ const { App, AwsLambdaReceiver } = bolt;
 import OpenAI from "openai";
 import AWS from "aws-sdk";
 const SQS = AWS.SQS;
+import fetch from "node-fetch";
 
 const awsLambdaReceiver = new AwsLambdaReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
@@ -94,35 +95,67 @@ app.event("app_mention", async ({ event, client, say }) => {
     console.log(threadMessages);
 
     // OpenAI APIに渡すためのメッセージオブジェクトを作成する。
-    const mentionMessages = threadMessages
-      .map((message) => {
-        const role = message.user === slackBotId ? "assistant" : "user";
-        let content = message.text.replace(/<@[A-Z0-9]+>/g, "").trim();
-        const urlRegex = /https?:\/\/[^\s]+?\.(png|jpeg|jpg|webp|gif)/gi;
+    let mentionMessages = [];
+    const urlRegex = /https?:\/\/[^\s]+?\.(png|jpeg|jpg|webp|gif)/gi;
+    const imageFileTypes = ["png", "jpeg", "jpg", "webp", "gif"];
+    for (const message of threadMessages) {
+      const role = message.user === slackBotId ? "assistant" : "user";
+      let content = message.text.replace(/<@[A-Z0-9]+>/g, "").trim();
+      let images = [];
 
-        if (message.files && message.files.length !== 0) {
-          console.log(message.files[0]);
-        }
+      // BOT側のメッセージで画像は設定できないという仕様がある
+      if (role === "assistant") {
+        mentionMessages.push({
+          role: role,
+          content,
+        });
+        continue;
+      }
 
-        // マッチした全てのURLを配列で取得
-        const urls = content.match(urlRegex);
-        if (!urls) {
-          return {
+      // マッチした全てのURLを配列で取得
+      const urls = content.match(urlRegex);
+      if (!urls) {
+        // 画像が添付されているかどうか
+        if (!message.files || message.files.length === 0) {
+          mentionMessages.push({
             role: role,
             content,
-          };
+          });
+          continue;
         }
 
-        const images = urls.map((url) => ({
+        const imageFiles = message.files.filter((file) => {
+          const fileType = file.mimetype.split("/")[1];
+          return imageFileTypes.includes(fileType);
+        });
+        if (imageFiles.length !== 0) {
+          images = await Promise.all(
+            imageFiles.map(async (file) => {
+              const base64Image = await getImageBase64(file.url_private);
+              console.log(file);
+              return {
+                type: "image_url",
+                image_url: {
+                  url: `data:${file.mimetype};base64,${base64Image}`,
+                },
+              };
+            })
+          );
+          console.log("imageFiles", images);
+        }
+      } else {
+        images = urls.map((url) => ({
           type: "image_url",
           image_url: {
             url: url,
             detail: "auto",
           },
         }));
-        console.log(images);
+        console.log("urls", images);
+      }
 
-        return {
+      if (images.length !== 0) {
+        mentionMessages.push({
           role: role,
           content: [
             {
@@ -131,9 +164,19 @@ app.event("app_mention", async ({ event, client, say }) => {
             },
             ...images,
           ],
-        };
-      })
-      .filter((e) => e);
+        });
+        continue;
+      } else {
+        mentionMessages.push({
+          role: role,
+          content,
+        });
+        continue;
+      }
+    }
+
+    console.log(mentionMessages);
+    console.log(JSON.stringify(mentionMessages));
 
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_TOKEN,
@@ -346,6 +389,17 @@ app.view("generate_image", async ({ ack, body, view, client, logger }) => {
     });
   }
 });
+
+const getImageBase64 = async (url) => {
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+    },
+  });
+  console.log(response);
+  const buffer = await response.buffer();
+  return buffer.toString("base64");
+};
 
 export const handler = async (event, context) => {
   // 再送かをチェック
