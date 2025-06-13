@@ -1,179 +1,102 @@
 import bolt from "@slack/bolt";
 const { App, AwsLambdaReceiver } = bolt;
-import { addModal, createCookList } from "./type.mjs";
 import { sql } from "@vercel/postgres";
-import OpenAI from "openai";
 
+// AWS Lambda Receiverのセットアップ
 const awsLambdaReceiver = new AwsLambdaReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
 });
 
+// Slackアプリのセットアップ
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
   receiver: awsLambdaReceiver,
 });
 
-// show modal
-app.command("/cook-add", async ({ ack, body, client, logger }) => {
-  // コマンドのリクエストを確認
-  await ack();
+// メッセージが #hololive-notify に投稿されたときのイベントリスナー
+app.event("message", async ({ event, client, logger }) => {
+  // IFTTTボットからのメッセージかどうかを確認
+  if (
+    event.channel === process.env.NOTIFY_CHANNEL_ID &&
+    event.bot_id &&
+    event.bot_id === process.env.IFTTT_BOT_ID
+  ) {
+    try {
+      // メッセージからuser_idを抽出（@付きのTwitter ID）
+      for (const attachment of event.attachments) {
+        const twitterId = extractUserIdFromText(attachment.pretext);
+        if (!twitterId) {
+          logger.info("User ID could not be extracted from message.");
+          return;
+        }
 
-  const privateMetadata = JSON.stringify({
-    channelId: body.channel_id, // または body.channel.id になる場合があります
-  });
-
-  try {
-    const result = await client.views.open({
-      // 適切な trigger_id を受け取ってから 3 秒以内に渡す
-      trigger_id: body.trigger_id,
-      // view の値をペイロードに含む
-      view: {
-        type: "modal",
-        // callback_id が view を特定するための識別子
-        callback_id: "view_1",
-        title: {
-          type: "plain_text",
-          text: "新規登録",
-        },
-        private_metadata: privateMetadata,
-        blocks: addModal,
-        submit: {
-          type: "plain_text",
-          text: "Submit",
-        },
-      },
-    });
-    logger.info(result);
-  } catch (error) {
-    logger.error(error);
+        // twitter_channel_mapping テーブルから該当するSlackチャンネルを取得
+        const { rows: usersToNotify } = await sql`
+        SELECT channel_id FROM twitter_channel_mapping WHERE twitter_id = ${twitterId};
+        `;
+        // 該当するSlackチャンネルにメッセージを転送
+        for (const user of usersToNotify) {
+          // チャンネル削除などで送信失敗した場合は握りつぶす
+          try {
+            await client.chat.postMessage({
+              channel: user.channel_id,
+              text: attachment.pretext, // オリジナルのメッセージをそのまま転送
+            });
+          } catch (e) {
+            console.error("Error fowarding message: ", e, user.channel_id);
+            continue;
+          }
+        }
+      }
+    } catch (error) {
+      logger.error("Error forwarding message: ", error);
+      console.error(event);
+    }
   }
 });
 
-app.view("view_1", async ({ ack, body, view, client, logger }) => {
-  // モーダルでのデータ送信リクエストを確認
+// メッセージからuser_idを抽出する関数（フォーマット: @hiodoshaio）
+function extractUserIdFromText(text) {
+  const match = text.match(/@(\w+)/); // メッセージ内の @twitter_id を抽出
+  return match ? match[1] : null;
+}
+
+app.command("/hololive-notify", async ({ ack, body, client, logger }) => {
   await ack();
-
-  // private_metadataからチャンネルIDを取得
-  const privateMetadata = JSON.parse(view.private_metadata);
-  const channelId = privateMetadata.channelId;
-
-  // ユーザーにメッセージを送信
-  try {
-    const val = view["state"]["values"];
-    const cookName = val.name_block.cook_name.value;
-    const cookLink = val.link_block.cook_link.value
-      ? val.link_block.cook_link.value
-      : null;
-    const cookMemo = val.memo_block.cook_note.value
-      ? val.memo_block.cook_note.value
-      : null;
-
-    const { rows } =
-      await sql`INSERT INTO cook(name, link, memo, is_cook, user_name) VALUES (${cookName}, ${cookLink}, ${cookMemo}, false, 'Slack App') RETURNING id, name;`;
-
-    const user = body["user"]["id"];
-    const createdRow = rows[0];
-    const msg = `<@${user}> さん\n登録ありがとうございます。永野芽郁です。\n${createdRow.name}：https://cook.nishioka-app.com/item/${createdRow.id}`;
-
-    await client.chat.postMessage({
-      channel: channelId,
-      text: msg,
-    });
-  } catch (error) {
-    logger.error(error);
-  }
-});
-
-app.command("/cook-list", async ({ ack, say }) => {
-  // コマンドのリクエストを確認
-  await ack();
-
-  const { rows } =
-    await sql`SELECT id,name,is_cook FROM cook ORDER BY created_at DESC LIMIT 5;`;
-
-  await say({
-    blocks: createCookList(rows),
+  const message =
+    "ホロメンのツイート転送設定方法！ \n\n" +
+    "以下のスプレッドシートから転送設定を行なってください\n" +
+    "1. 雛形シートをコピーする\n" +
+    "2. チャンネル名、作成者を入力する\n" +
+    "3. ツイート転送を行うホロメンをホロメン一覧シートから転記する（分類同期で一括転記も可能）\n" +
+    "4. 設定反映ボタンを押下する\n\n" +
+    "LINK:https://docs.google.com/spreadsheets/d/1RDWudhyaifU5SM3PYAD8utq3T5mY1MzpPanPWWkf0hA/edit?gid=1679424553#gid=1679424553";
+  await client.chat.postMessage({
+    channel: body.channel_id,
+    text: message,
   });
 });
 
-// open ai
-app.event("app_mention", async ({ event, client, say }) => {
-  // スレッドのトップのメッセージであればthread_ts、スレッド中のメッセージであればtsを取得する。
-  const threadTs = event.thread_ts ? event.thread_ts : event.ts;
-
-  try {
-    // スレッドのメッセージを取得
-    const threadMessagesResponse = await client.conversations.replies({
-      channel: event.channel,
-      ts: threadTs,
-    });
-    const threadMessages = threadMessagesResponse.messages;
-
-    const slackBotId = process.env.SLACK_BOT_ID;
-
-    // OpenAI APIに渡すためのメッセージオブジェクトを作成する。
-    const mentionMessages = threadMessages
-      .map((message) => {
-        const role = message.user === slackBotId ? "assistant" : "user";
-        return {
-          role: role,
-          content: message.text.replace(/<@[A-Z0-9]+>/g, "").trim(),
-        };
-      })
-      .filter((e) => e); // undefinedを除く
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_TOKEN,
-    });
-
-    // Chat completions APIを呼ぶ
-    const response = await openai.chat.completions.create({
-      model:
-        event.text.indexOf("gpt-4") !== -1
-          ? "gpt-4"
-          : process.env.OPEN_AI_MODEL,
-      messages: [
-        {
-          role: "system",
-          content: process.env.OPENAI_API_CONTENT,
-        },
-        ...mentionMessages,
-      ],
-    });
-    const message = response.choices[0].message.content;
-
-    await say({
-      text: message,
-      text: `<@${event.user}>\n${message}`,
-      thread_ts: threadTs,
-    });
-  } catch (e) {
-    console.error(e);
-    await say({
-      text: `<@${event.user}> 君\n 不具合が発生しました。開発者にお問い合わせください。`,
-      thread_ts: threadTs,
-    });
-  }
-});
-
+// AWS Lambdaハンドラー
 export const handler = async (event, context) => {
-  // 再送かをチェック
+  // Slack再送イベントのチェック
   if (event.headers["x-slack-retry-num"]) {
     return {
       statusCode: 200,
       body: JSON.stringify({ message: "No need to resend" }),
     };
   }
-  const handler = await awsLambdaReceiver.start();
-  return handler(event, context);
-};
 
-// function escapeMarkdown(text) {
-//   return text
-//     .replace(/&/g, "&amp;")
-//     .replace(/</g, "&lt;")
-//     .replace(/>/g, "&gt;")
-//     .replace(/"/g, "&quot;")
-//     .replace(/'/g, "&#x27;")
-//     .replace(/`/g, "\\`");
-// }
+  try {
+    // Lambda Receiverの実行
+    const handler = await awsLambdaReceiver.start();
+    return handler(event, context);
+  } catch (error) {
+    console.error("Error starting Slack event listener:", error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ message: "Internal server error" }),
+    };
+  }
+};

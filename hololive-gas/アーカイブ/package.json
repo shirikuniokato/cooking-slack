@@ -1,7 +1,6 @@
 {
-  "name": "cooking-slack",
+  "name": "hololive-gas",
   "version": "1.0.0",
-  "description": "",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -9,8 +8,8 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "description": "",
   "dependencies": {
-    "@slack/bolt": "^3.17.1",
-    "@vercel/postgres": "^0.7.2"
+    "@vercel/postgres": "^0.10.0"
   }
 }
